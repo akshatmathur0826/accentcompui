@@ -1,16 +1,16 @@
 // AccentComprehensionApp.jsx
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
     Container, Typography, Card, CardContent, Button, TextField, Select,
     MenuItem, FormControl, InputLabel, Tabs, Tab, Box, CircularProgress,
-    IconButton
+    IconButton, Slider
 } from "@mui/material";
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import PauseIcon from '@mui/icons-material/Pause';
 import ReplayIcon from '@mui/icons-material/Replay';
 import SpeedIcon from '@mui/icons-material/Speed';
 
-import { listenAudio, getGeminiResponse } from "./TranscriptionService";
+import { listenAudio, getGeminiResponse, sendUserResponse } from "./TranscriptionService";
 
 const accentOptions = {
     us: { voice_id: "EXAVITQu4vr4xnSDxMaL", lang: "us" },
@@ -30,24 +30,45 @@ const AccentComprehensionApp = () => {
     const [isPlaying, setIsPlaying] = useState(false);
     const [groundTruth, setGroundTruth] = useState("");
     const [loading, setLoading] = useState(false);
+    const [duration, setDuration] = useState(0);
+    const [currentTime, setCurrentTime] = useState(0);
+
     const audioRef = useRef(null);
+    const intervalRef = useRef(null);
+
+    useEffect(() => {
+        return () => clearInterval(intervalRef.current); // Cleanup
+    }, []);
+
+    const startTimer = () => {
+        clearInterval(intervalRef.current);
+        intervalRef.current = setInterval(() => {
+            if (audioRef.current) {
+                setCurrentTime(audioRef.current.currentTime);
+            }
+        }, 200);
+    };
 
     const createAndPlayAudio = async (text, voiceId) => {
-        setLoading(true);
         try {
             const response = await listenAudio(text, voiceId);
             const audioBlob = await response.blob();
             const audioUrl = URL.createObjectURL(audioBlob);
             const audio = new Audio(audioUrl);
             audio.playbackRate = playbackSpeed;
-            audio.onended = () => setIsPlaying(false);
+            audio.onended = () => {
+                setIsPlaying(false);
+                clearInterval(intervalRef.current);
+            };
+            audio.onloadedmetadata = () => {
+                setDuration(audio.duration);
+            };
             audioRef.current = audio;
             audio.play();
             setIsPlaying(true);
+            startTimer();
         } catch (error) {
             console.error("Error playing audio:", error);
-        } finally {
-            setLoading(false);
         }
     };
 
@@ -56,16 +77,25 @@ const AccentComprehensionApp = () => {
     };
 
     const handlePlayNewAudio = async () => {
+        setLoading(true);
         const generatedText = await getGeminiResponse();
-        if (!generatedText) return;
+        if (!generatedText) {
+            setLoading(false);
+            return;
+        }
         setGroundTruth(generatedText);
         await playAudioFromText(generatedText);
+        setLoading(false);
+        setScore(null);
     };
 
     const handleAccentChange = async (e) => {
+        handlePause();
         const newAccent = e.target.value;
         setSelectedAccent(newAccent);
-        if (groundTruth) await createAndPlayAudio(groundTruth, accentOptions[newAccent].voice_id);
+        if (groundTruth) {
+            await createAndPlayAudio(groundTruth, accentOptions[newAccent].voice_id);
+        }
     };
 
     const handlePlay = () => {
@@ -73,6 +103,7 @@ const AccentComprehensionApp = () => {
             audioRef.current.playbackRate = playbackSpeed;
             audioRef.current.play();
             setIsPlaying(true);
+            startTimer();
         }
     };
 
@@ -80,6 +111,7 @@ const AccentComprehensionApp = () => {
         if (audioRef.current) {
             audioRef.current.pause();
             setIsPlaying(false);
+            clearInterval(intervalRef.current);
         }
     };
 
@@ -89,16 +121,27 @@ const AccentComprehensionApp = () => {
             audioRef.current.playbackRate = playbackSpeed;
             audioRef.current.play();
             setIsPlaying(true);
+            startTimer();
         }
     };
 
-    const handleSubmit = () => {
-        // Future: NLP based comparison
-        // const words1 = userInput.trim().toLowerCase().split(/\s+/);
-        // const words2 = groundTruth.toLowerCase().split(/\s+/);
-        // const matched = words1.filter((word, idx) => word === words2[idx]);
-        // const percentage = Math.round((matched.length / words2.length) * 100);
-        // setScore(percentage);
+    const handleSliderChange = (_, newValue) => {
+        if (audioRef.current) {
+            audioRef.current.currentTime = newValue;
+            setCurrentTime(newValue);
+        }
+    };
+
+    const handleSubmit = async () => {
+        try {
+            const res = await sendUserResponse(userInput, groundTruth);
+            console.log("User response submitted:", res);
+            if (res && res.combined_score) {
+                setScore(res.combined_score);
+            }
+        } catch (err) {
+            console.error("Error submitting user response:", err);
+        }
     };
 
     return (
@@ -156,10 +199,7 @@ const AccentComprehensionApp = () => {
                     </Box>
 
                     <Box display="flex" justifyContent="center" alignItems="center" gap={2} flexWrap="wrap">
-                        <IconButton
-                            onClick={isPlaying ? handlePause : handlePlay}
-                            disabled={!audioRef.current}
-                        >
+                        <IconButton onClick={isPlaying ? handlePause : handlePlay} disabled={!audioRef.current}>
                             {isPlaying ? <PauseIcon /> : <PlayArrowIcon />}
                         </IconButton>
                         <IconButton onClick={handleReplay} disabled={!audioRef.current}>
@@ -186,6 +226,18 @@ const AccentComprehensionApp = () => {
                         </FormControl>
                     </Box>
 
+                    {/* Progress Bar */}
+                    {duration > 0 && (
+                        <Slider
+                            value={currentTime}
+                            min={0}
+                            max={duration}
+                            step={0.1}
+                            onChange={handleSliderChange}
+                            sx={{ mt: -2 }}
+                        />
+                    )}
+
                     <TextField
                         fullWidth
                         label="Type what you heard"
@@ -200,6 +252,7 @@ const AccentComprehensionApp = () => {
                         <Button
                             variant="contained"
                             onClick={handleSubmit}
+                            disabled={!userInput || !groundTruth}
                             sx={{
                                 backgroundColor: "black",
                                 color: "white",
@@ -214,16 +267,34 @@ const AccentComprehensionApp = () => {
                     </Box>
 
                     {score !== null && (
-                        <Box textAlign="center" mt={2}>
-                            <Typography variant="h6" fontWeight="medium">Accuracy: {score}%</Typography>
-                            <Button
-                                variant="outlined"
-                                onClick={() => setShowTranscript(!showTranscript)}
-                                sx={{ mt: 1 }}
-                            >
-                                {showTranscript ? "Hide" : "Show"} Correct Transcript
-                            </Button>
-                            {/* {showTranscript && <Typography variant="body2" sx={{ mt: 1 }}>{groundTruth}</Typography>} */}
+                        <Box textAlign="center" mt={4}>
+                            <Typography variant="h6" fontWeight="bold" gutterBottom>
+                                Accuracy Score:{" "}
+                                <span style={{ color: score >= 85 ? "green" : score >= 60 ? "#fbc02d" : "red" }}>
+                                    {score}%
+                                </span>
+                            </Typography>
+
+                            <Typography variant="body2" gutterBottom sx={{ fontStyle: "italic" }}>
+                                {score >= 85
+                                    ? "🎯 Excellent comprehension!"
+                                    : score >= 60
+                                    ? "👍 Good attempt, try again for better clarity."
+                                    : "⚠️ Needs improvement. Listen again carefully."}
+                            </Typography>
+
+                            <Box mt={3}>
+                                <Typography variant="subtitle1" fontWeight="medium">Correct Transcript:</Typography>
+                                <Typography variant="body2" sx={{
+                                    mt: 1,
+                                    p: 2,
+                                    backgroundColor: "#f5f5f5",
+                                    borderRadius: "8px",
+                                    fontStyle: "italic"
+                                }}>
+                                    {groundTruth}
+                                </Typography>
+                            </Box>
                         </Box>
                     )}
                 </CardContent>
